@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Casdoor Login with Cryptocurrency Updates</title>
+    <script src="https://unpkg.com/protobufjs@7.2.4/dist/protobuf.min.js"></script>
+    <style>
+        #updates { margin-top: 20px; }
+        .price-update {
+            padding: 10px; margin: 5px 0; border-radius: 5px;
+            background-color: #fff; border: 1px solid #ddd;
+        }
+        .price-update.up { background-color: #e6ffe6; border-color: #28a745; }
+        .price-update.down { background-color: #ffe6e6; border-color: #dc3545; }
+    </style>
+</head>
+<body>
+<h1>Casdoor Login (Token in Cookie)</h1>
+<div id="status">Not logged in</div>
+<button onclick="login()">Login with Casdoor</button>
+<button onclick="getUserInfo()">Get User Info</button>
+<pre id="userinfo"></pre>
+
+<h2>Cryptocurrency Updates</h2>
+<button onclick="toggleSubscription('json')" id="subscribeJsonBtn">Subscribe to JSON</button>
+<button onclick="toggleSubscription('protobuf')" id="subscribeProtoBtn">Subscribe to Protobuf</button>
+<div id="updates"></div>
+
+<script>
+    let ws = null;
+    let isSubscribed = false;
+    let websocketUrl = null;
+    let subscriptionType = null;
+
+    const tickerUpdateProto = {
+        nested: {
+            TickerUpdate: {
+                fields: {
+                    coin: { type: "string", id: 1 },
+                    timestamp: { type: "int64", id: 2 },
+                    price: { type: "double", id: 3 }
+                }
+            }
+        }
+    };
+    const TickerUpdate = protobuf.Root.fromJSON(tickerUpdateProto).lookupType("TickerUpdate");
+
+    async function loadConfig() {
+        try {
+            const response = await fetch('/config');
+            const config = await response.json();
+            websocketUrl = config.websocketUrl || 'wss://localhost:9000';
+            console.log('Loaded WebSocket URL:', websocketUrl);
+        } catch (error) {
+            console.error('Failed to load configuration:', error);
+            websocketUrl = 'wss://localhost:9000';
+        }
+    }
+
+    window.onload = async () => {
+        await loadConfig();
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('loggedIn') === 'true') {
+            document.getElementById('status').innerText = 'Already logged in!';
+            window.history.replaceState({}, document.title, window.location.pathname);
+        } else {
+            checkLoginStatus();
+        }
+    };
+
+    function login() {
+        window.location.href = '/login';
+    }
+
+    function checkLoginStatus() {
+        const token = getCookie('access_token');
+        if (token) {
+            document.getElementById('status').innerText = 'Already logged in!';
+        } else {
+            document.getElementById('status').innerText = 'Not logged in';
+        }
+    }
+
+    async function getUserInfo() {
+        const token = getCookie('access_token');
+        if (!token) {
+            document.getElementById('status').innerText = 'Not logged in';
+            document.getElementById('userinfo').innerText = 'No token found!';
+            return;
+        }
+        try {
+            const res = await fetch('/userinfo', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                document.getElementById('userinfo').innerText = JSON.stringify(data, null, 2);
+                document.getElementById('status').innerText = 'Logged in as: ' + (data.username || 'Unknown');
+            } else {
+                const errorText = await res.text();
+                document.getElementById('userinfo').innerText = 'Failed to get user info: ' + errorText;
+                document.getElementById('status').innerText = 'Not logged in';
+            }
+        } catch (error) {
+            console.error('Error fetching user info:', error);
+            document.getElementById('userinfo').innerText = 'Error fetching user info';
+        }
+    }
+
+    function setCookie(name, value, days) {
+        const expires = new Date(Date.now() + days * 864e5).toUTCString();
+        document.cookie = `${name}=${value};expires=${expires};path=/`;
+    }
+
+    function getCookie(name) {
+        return document.cookie.split('; ')
+            .find(row => row.startsWith(name + '='))
+            ?.split('=')[1];
+    }
+
+    function toggleSubscription(type) {
+        if (isSubscribed && subscriptionType === type) {
+            unsubscribe();
+        } else {
+            if (isSubscribed) unsubscribe();
+            subscribe(type);
+        }
+    }
+
+    function subscribe(type) {
+        const token = getCookie('access_token');
+        console.log('Token from cookie:', token);
+        if (!token) {
+            alert('Please login first');
+            return;
+        }
+        if (!websocketUrl) {
+            alert('WebSocket configuration not loaded');
+            return;
+        }
+
+        subscriptionType = type;
+        const formatParam = type === 'protobuf' ? '&format=protobuf' : '';
+        const wsUrl = `${websocketUrl}/coins?token=${encodeURIComponent(token)}${formatParam}`;
+        console.log('Connecting to: ', wsUrl);
+        ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            console.log(`Connected to WebSocket (${type === 'json' ? 'JSON' : 'Protobuf'})`);
+            isSubscribed = true;
+            document.getElementById('status').innerText = `Connected to WebSocket (${type === 'json' ? 'JSON' : 'Protobuf'})`;
+            document.getElementById(`subscribe${type === 'json' ? 'Json' : 'Proto'}Btn`).innerText = `Unsubscribe from ${type === 'json' ? 'JSON' : 'Protobuf'}`;
+        };
+
+        ws.onmessage = (event) => {
+            if (type === 'json') {
+                try {
+                    const data = JSON.parse(event.data);
+                    displayUpdate({
+                        coin: data.coin,
+                        price: data.price,
+                        timestamp: data.timestamp,
+                        format: 'JSON'
+                    });
+                } catch (e) {
+                    console.error('Error parsing JSON message:', e);
+                }
+            } else {
+                handleProtobufMessage(event.data);
+            }
+        };
+
+        ws.onclose = (event) => {
+            console.log(`Disconnected from WebSocket (${type === 'json' ? 'JSON' : 'Protobuf'}):`, event.reason);
+            isSubscribed = false;
+            subscriptionType = null;
+            document.getElementById('status').innerText = event.reason || 'Disconnected from WebSocket';
+            document.getElementById('subscribeJsonBtn').innerText = 'Subscribe to JSON';
+            document.getElementById('subscribeProtoBtn').innerText = 'Subscribe to Protobuf';
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            document.getElementById('status').innerText = 'WebSocket connection failed';
+        };
+    }
+
+    function unsubscribe() {
+        if (ws) {
+            ws.close();
+            ws = null;
+        }
+        isSubscribed = false;
+        subscriptionType = null;
+        document.getElementById('subscribeJsonBtn').innerText = 'Subscribe to JSON';
+        document.getElementById('subscribeProtoBtn').innerText = 'Subscribe to Protobuf';
+        document.getElementById('status').innerText = 'Disconnected from WebSocket';
+    }
+
+    function handleProtobufMessage(data) {
+        try {
+            const uint8Array = new Uint8Array(data);
+            const decoded = TickerUpdate.decode(uint8Array);
+            const time = new Date(decoded.timestamp).toLocaleTimeString('en-US', { hour12: false });
+            displayUpdate({
+                coin: decoded.coin,
+                price: decoded.price,
+                timestamp: decoded.timestamp,
+                format: 'Protobuf'
+            });
+        } catch (e) {
+            console.error('Error decoding Protobuf message:', e);
+        }
+    }
+
+    function displayUpdate(data) {
+        console.log('Displaying data:', data);
+        const updatesDiv = document.getElementById('updates');
+        let updateElement = document.getElementById(`coin-${data.coin}`);
+        if (!updateElement) {
+            updateElement = document.createElement('div');
+            updateElement.id = `coin-${data.coin}`;
+            updateElement.className = 'price-update';
+            updatesDiv.appendChild(updateElement);
+        }
+        const timestamp = new Date(data.timestamp).toLocaleTimeString('en-US', { hour12: false });
+        updateElement.innerHTML = `
+            <strong>${data.coin}</strong>: $${data.price.toFixed(2)}
+            <small>(${timestamp}, ${data.format})</small>
+        `;
+        const oldPrice = parseFloat(updateElement.dataset.lastPrice || '0');
+        updateElement.dataset.lastPrice = data.price;
+        if (oldPrice > 0) {
+            updateElement.classList.remove('up', 'down');
+            if (data.price > oldPrice) {
+                updateElement.classList.add('up');
+            } else if (data.price < oldPrice) {
+                updateElement.classList.add('down');
+            }
+        }
+    }
+</script>
+</body>
+</html>
