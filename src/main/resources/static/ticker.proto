@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+option java_package = "com.example.tickers.protobuf";
+option java_multiple_files = true;
+
+message TickerUpdate {
+  string coin = 1;
+  int64 timestamp = 2;
+  double price = 3;
+}
